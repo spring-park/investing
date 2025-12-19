@@ -1,4 +1,5 @@
 import sys
+from wsgiref import headers
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -43,8 +44,7 @@ class CrawlerThread(QThread):
 
         for page in range(1, self.pages+1):
             try:
-                url = f"https://finance.naver.com/sise/field_submit.naver?menu=market_sum&returnUrl=http://finance.naver.com/sise/sise_market_sum.naver?page={page}&fieldIds=market_sum&fieldIds=debt_total&fieldIds=sales_increasing_rate&fieldIds=frgn_rate&fieldIds=per&fieldIds=roe"
-                # 효율적인 URL 구성 및 요청
+                url = f"https://finance.naver.com/sise/field_submit.naver?menu=market_sum&returnUrl=http://finance.naver.com/sise/sise_market_sum.naver?page={page}&fieldIds=market_sum&fieldIds=debt_total&fieldIds=frgn_rate&fieldIds=per&fieldIds=pbr&fieldIds=property_total"                # 효율적인 URL 구성 및 요청
                 response = session.get(
                     url,
                     headers=headers,
@@ -55,25 +55,33 @@ class CrawlerThread(QThread):
                 soup = BeautifulSoup(response.content, 'html.parser')
                 trs = soup.select("#contentarea > div.box_type_l >table.type_2 > tbody > tr[onmouseover='mouseOver(this)']")
                 
+                headers = [th.get_text(strip=True) for th in soup.select("table.type_2 thead th")]
+                idx = {h: i+1 for i, h in enumerate(headers)}  # td는 1부터 시작
+
+
                 for tr in trs:
-                    name = tr.select_one('td:nth-child(2)').text
-                    market_sum = tr.select_one('td:nth-child(7)').text
-                    debt_total = tr.select_one('td:nth-child(8)').text
-                    sales_increasing_rate = tr.select_one('td:nth-child(9)').text
-                    frgn_rate = tr.select_one('td:nth-child(10)').text
-                    per = tr.select_one('td:nth-child(11)').text
-                    roe = tr.select_one('td:nth-child(12)').text
+                    name = tr.select_one(f"td:nth-child({idx['종목명']})").get_text(strip=True)
+                    market_sum  = tr.select_one(f"td:nth-child({idx['시가총액']})").get_text(strip=True)
+                    asset_total = tr.select_one(f"td:nth-child({idx['자산총계']})").get_text(strip=True)
+                    debt_total  = tr.select_one(f"td:nth-child({idx['부채총계']})").get_text(strip=True)
+                    frgn_rate   = tr.select_one(f"td:nth-child({idx['외국인비율']})").get_text(strip=True)
+                    per         = tr.select_one(f"td:nth-child({idx['PER']})").get_text(strip=True)
+                    pbr         = tr.select_one(f"td:nth-child({idx['PBR']})").get_text(strip=True)
 
                     # 데이터 전처리 - 'N/A' 값이 아닌 경우만 처리
-                    if market_sum != 'N/A' and debt_total != 'N/A' and sales_increasing_rate != 'N/A' and frgn_rate != 'N/A' and per != 'N/A' and roe != 'N/A':
-                        market_sum = float(market_sum.replace(',', ''))
-                        debt_total = float(debt_total.replace(',', ''))
-                        sales_increasing_rate = float(sales_increasing_rate.replace(',', ''))
-                        frgn_rate = float(frgn_rate.replace(',', ''))
-                        per = float(per.replace(',', ''))
-                        roe = float(roe.replace(',', ''))
-                        # 데이터 추가
-                        data.append([name, market_sum, debt_total, sales_increasing_rate, frgn_rate, per, roe])
+                    if all(v != 'N/A' for v in [market_sum, asset_total, debt_total, frgn_rate, per, pbr]):
+                            # 숫자 변환
+                            m_val = float(market_sum.replace(',', ''))
+                            a_val = float(asset_total.replace(',', ''))
+                            d_val = float(debt_total.replace(',', ''))
+                            f_val = float(frgn_rate.replace(',', ''))
+                            p_val = float(per.replace(',', ''))
+                            pb_val = float(pbr.replace(',', ''))
+
+                        # [계산] 자기자본비율 추가
+                    equity_ratio = ((a_val - d_val) / a_val * 100) if a_val != 0 else 0
+#contentarea > div.box_type_l > table.type_2 > thead > tr > th:nth-child(8)                        # 데이터 추가
+                    data.append([name, m_val, p_val, pb_val, a_val, f_val, equity_ratio])                
                 
                 # 진행 상황 업데이트
                 progress = int((page / self.pages) * 100)
@@ -195,13 +203,12 @@ class StockCrawlerApp(QMainWindow):
         main_layout.addWidget(self.status_label)
         
         # 데이터 테이블
+        self.columns=["종목명", "시가총액(억)", "PER(배)", "PBR(배)", "자산총계(억)", "외국인비율", "자기자본비율(%)"]
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["종목명", "시가총액(억)", "부채총계(억)", 
-                                             "매출증가율", "외국인비율", "PER(배)", "ROE(%)"])
+        self.table.setColumnCount(len(self.columns))
+        self.table.setHorizontalHeaderLabels(self.columns)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         main_layout.addWidget(self.table)
-
         
     def start_crawling(self):
         """크롤링 작업 시작"""
@@ -235,9 +242,9 @@ class StockCrawlerApp(QMainWindow):
     
     def display_data(self, data):
         """수집된 데이터 테이블에 표시"""
+
         # 데이터프레임 생성
-        self.df = pd.DataFrame(data, columns=["종목명", "시가총액(억)", "부채총계(억)", 
-                                             "매출증가율", "외국인비율", "PER(배)", "ROE(%)"])
+        self.df = pd.DataFrame(data, columns = self.columns)
         
         # 테이블에 데이터 표시
         self.table.setRowCount(len(data))
